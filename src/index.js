@@ -7,6 +7,7 @@ const routes = {
   "docker-hub-proxy.xkeyc.com": "https://registry-1.docker.io",
   "gcr-hub-proxy.xkeyc.com": "https://gcr.io",
   "ghcr-hub-proxy.xkeyc.com": "https://ghcr.io",
+  "docker-ce-proxy":"https://download.docker.com",
 };
 
 function routeByHosts(host) {
