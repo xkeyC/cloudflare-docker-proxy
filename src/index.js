@@ -7,7 +7,7 @@ const routes = {
   "docker-hub-proxy.xkeyc.com": "https://registry-1.docker.io",
   "gcr-hub-proxy.xkeyc.com": "https://gcr.io",
   "ghcr-hub-proxy.xkeyc.com": "https://ghcr.io",
-  "docker-ce-proxy.xkeyc.com":"https://download.docker.com",
+  "docker-ce-proxy.xkeyc.com": "https://download.docker.com",
   "translate-g-proxy.xkeyc.com": "https://translate.googleapis.com"
 };
 
@@ -80,8 +80,8 @@ async function handleRequest(request) {
     const wwwAuthenticate = parseAuthenticate(authenticateStr);
     return await fetchToken(wwwAuthenticate, url.searchParams);
   }
-  // foward requests
-  const newUrl = new URL(upstream + url.pathname);
+  // forward requests
+  const newUrl = new URL(upstream + url.pathname + url.search);
   const newReq = new Request(newUrl, {
     method: request.method,
     headers: request.headers,
