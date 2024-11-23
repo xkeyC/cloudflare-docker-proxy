@@ -8,6 +8,7 @@ const routes = {
   "gcr-hub-proxy.xkeyc.com": "https://gcr.io",
   "ghcr-hub-proxy.xkeyc.com": "https://ghcr.io",
   "docker-ce-proxy.xkeyc.com":"https://download.docker.com",
+  "translate-g-proxy": "https://translate.googleapis.com"
 };
 
 function routeByHosts(host) {
