@@ -23,8 +23,7 @@ function getUpstream(host) {
 
 function isDockerRegistry(upstream) {
   try {
-    const hostname = new URL(upstream).hostname;
-    return DOCKER_REGISTRIES.has(hostname);
+    return DOCKER_REGISTRIES.has(new URL(upstream).hostname);
   } catch {
     return false;
   }
@@ -41,41 +40,30 @@ async function handleRequest(request) {
     });
   }
 
-  const dockerMode = isDockerRegistry(upstream);
-  if (dockerMode) {
-    if (url.pathname === '/v2/') {
-      return handleDockerAuth(upstream, request);
-    }
-    if (url.pathname === '/v2/auth') {
-      return handleDockerToken(upstream, request);
-    }
+  if (isDockerRegistry(upstream)) {
+    if (url.pathname === '/v2/') return handleDockerAuth(upstream, request);
+    if (url.pathname === '/v2/auth') return handleDockerToken(upstream, request);
   }
   return forwardRequest(upstream, request);
 }
 
 async function handleDockerAuth(upstream, request) {
   const authUrl = new URL(upstream + '/v2/');
-  const probeResp = await fetch(authUrl, {
-    headers: request.headers,
-    redirect: 'manual'
-  });
+  const probeResp = await fetch(authUrl, { headers: request.headers, redirect: 'manual' });
 
   if (probeResp.status !== 401) {
-    return new Response(null, {
-      status: probeResp.status,
-      headers: probeResp.headers
-    });
+    return new Response(null, { status: probeResp.status, headers: probeResp.headers });
   }
 
   const wwwAuth = probeResp.headers.get('WWW-Authenticate') || '';
-  const { realm, service, scope } = parseAuthHeader(wwwAuth);
+  const { realm, service } = parseAuthHeader(wwwAuth);
   const proxyRealm = `https://${new URL(request.url).hostname}/v2/auth`;
 
   const authHeader = [
     `Bearer realm="${proxyRealm}"`,
     `service="${service || 'registry.docker.io'}"`,
-    scope ? `scope="${scope}"` : `scope="repository:${getImageName(request)}:pull"`
-  ].filter(Boolean).join(', ');
+    `scope="repository:${getImageName(request)}:pull"`
+  ].join(', ');
 
   return new Response(null, {
     status: 401,
@@ -85,21 +73,23 @@ async function handleDockerAuth(upstream, request) {
 
 async function handleDockerToken(upstream, request) {
   const url = new URL(request.url);
-  const authUrl = new URL(upstream + '/v2/');
-  const authResp = await fetch(authUrl, { headers: request.headers });
-  const wwwAuth = authResp.headers.get('WWW-Authenticate') || '';
-  const { realm, service } = parseAuthHeader(wwwAuth);
+  const tokenUrl = new URL(parseAuthHeader(
+    await (await fetch(new URL(upstream + '/v2/'))).headers.get('WWW-Authenticate') || ''
+  ).realm);
 
-  const tokenUrl = new URL(realm);
-  tokenUrl.searchParams.set('service', service);
-  url.searchParams.forEach((v, k) => tokenUrl.searchParams.set(k, v));
-
-  if (!tokenUrl.searchParams.has('scope')) {
-    const image = getImageName(request);
-    tokenUrl.searchParams.set('scope', `repository:${image}:pull`);
+  // 强制使用修正后的镜像名称
+  if (!url.searchParams.has('scope')) {
+    url.searchParams.set('scope', `repository:${getImageName(request)}:pull`);
   }
 
-  return fetch(tokenUrl.toString(), {
+  // 保留客户端原始参数并追加必要参数
+  tokenUrl.search = new URLSearchParams([
+    ...tokenUrl.searchParams.entries(),
+    ...url.searchParams.entries(),
+    ['service', 'registry.docker.io']
+  ]).toString();
+
+  return fetch(tokenUrl, {
     headers: {
       'User-Agent': request.headers.get('User-Agent') || '',
       'Accept': 'application/json'
@@ -108,8 +98,8 @@ async function handleDockerToken(upstream, request) {
 }
 
 function forwardRequest(upstream, request) {
-  const url = new URL(request.url);
   const target = new URL(upstream);
+  const url = new URL(request.url);
   
   target.pathname = url.pathname;
   target.search = url.search;
@@ -125,26 +115,23 @@ function forwardRequest(upstream, request) {
 }
 
 function parseAuthHeader(header) {
-  const params = {};
-  header.replace(/Bearer\s+/i, '')
-    .split(/,\s*/)
-    .forEach(pair => {
-      const [key, value] = pair.split('=', 2);
-      if (key) params[key] = (value || '').replace(/^"+|"+$/g, '');
-    });
-  return params;
+  return header.replace(/Bearer\s+/i, '').split(/,\s*/).reduce((acc, pair) => {
+    const [k, v] = pair.split('=', 2);
+    if (k) acc[k] = (v || '').replace(/^"+|"+$/g, '');
+    return acc;
+  }, {});
 }
 
 function getImageName(request) {
   const path = new URL(request.url).pathname;
-  const match = path.match(/\/v2\/([^\/]+)/);
-  let image = match ? match[1] : 'library/nginx';
-
+  let image = (path.match(/\/v2\/([^\/]+)/) || [,'library/nginx'])[1];
+  
+  // 处理镜像名称转换
   if (image.startsWith('_/')) {
     image = `library/${image.slice(2)}`;
   } else if (!image.includes('/')) {
     image = `library/${image}`;
   }
-
+  
   return image;
 }
