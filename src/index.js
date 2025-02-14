@@ -1,6 +1,7 @@
-addEventListener('fetch', event => {
-  event.respondWith(handleRequest(event.request))
-})
+addEventListener("fetch", (event) => {
+  event.passThroughOnException();
+  event.respondWith(handleRequest(event.request));
+});
 
 const routes = {
   "docker-hub-proxy.xkeyc.com": "https://registry-1.docker.io",
@@ -8,108 +9,108 @@ const routes = {
   "ghcr-hub-proxy.xkeyc.com": "https://ghcr.io",
   "docker-ce-proxy.xkeyc.com": "https://download.docker.com",
   "translate-g-proxy.xkeyc.com": "https://translate.googleapis.com"
+};
+
+function routeByHosts(host) {
+  if (host in routes) {
+    return routes[host];
+  }
+  if (MODE == "debug") {
+    return TARGET_UPSTREAM;
+  }
+  return "";
 }
 
 async function handleRequest(request) {
-  const url = new URL(request.url)
-  const upstream = routeByHosts(url.hostname)
-  
-  if (upstream.includes('registry-1.docker.io')) {
-    const authResponse = await handleDockerAuth(url, request)
-    if (authResponse) return authResponse
-  }
-
-  const proxyRequest = buildProxyRequest(request, upstream)
-  
-  const response = await fetch(proxyRequest)
-  return processProxyResponse(response, upstream, url.hostname)
-}
-
-function routeByHosts(host) {
-  return routes[host] || (typeof MODE !== 'undefined' && MODE === 'debug' ? TARGET_UPSTREAM : null)
-}
-
-async function handleDockerAuth(url, request) {
-  if (url.pathname === '/v2/') {
-    return new Response(null, {
-      status: 401,
-      headers: {
-        'Www-Authenticate': `Bearer realm="https://${url.hostname}/v2/auth",service="registry.docker.io"`
+  const url = new URL(request.url);
+  const upstream = routeByHosts(url.hostname);
+  if (upstream === "") {
+    return new Response(
+      JSON.stringify({
+        routes: routes,
+      }),
+      {
+        status: 404,
       }
-    })
+    );
   }
-
-  if (url.pathname === '/v2/auth') {
-    const authUrl = new URL('https://auth.docker.io/token')
-    authUrl.search = url.search
-    return fetch(authUrl.toString())
+  // check if need to authenticate
+  if (url.pathname == "/v2/") {
+    const newUrl = new URL(upstream + "/v2/");
+    const resp = await fetch(newUrl.toString(), {
+      method: "GET",
+      redirect: "follow",
+    });
+    if (resp.status === 200) {
+    } else if (resp.status === 401) {
+      const headers = new Headers();
+      if (MODE == "debug") {
+        headers.set(
+          "Www-Authenticate",
+          `Bearer realm="${LOCAL_ADDRESS}/v2/auth",service="cloudflare-docker-proxy"`
+        );
+      } else {
+        headers.set(
+          "Www-Authenticate",
+          `Bearer realm="https://${url.hostname}/v2/auth",service="cloudflare-docker-proxy"`
+        );
+      }
+      return new Response(JSON.stringify({ message: "UNAUTHORIZED" }), {
+        status: 401,
+        headers: headers,
+      });
+    } else {
+      return resp;
+    }
   }
-  
-  return null
-}
-
-// 构造代理请求
-function buildProxyRequest(originalRequest, upstream) {
-  const url = new URL(originalRequest.url)
-  const headers = new Headers(originalRequest.headers)
-  
-  const target = new URL(upstream)
-  headers.set('Host', target.hostname)
-
-  return new Request(target.origin + url.pathname + url.search, {
-    method: originalRequest.method,
-    headers: headers,
-    body: originalRequest.body
-  })
-}
-
-// 处理代理响应
-async function processProxyResponse(response, upstream, proxyHost) {
-  // JSON响应处理
-  if (await isJsonResponse(response)) {
-    const text = await response.text()
-    const modified = replaceUpstreamUrls(text, upstream, proxyHost)
-    
-    const headers = new Headers(response.headers)
-    headers.delete('content-length')
-    
-    return new Response(modified, {
-      status: response.status,
-      headers: headers
-    })
+  // get token
+  if (url.pathname == "/v2/auth") {
+    const newUrl = new URL(upstream + "/v2/");
+    const resp = await fetch(newUrl.toString(), {
+      method: "GET",
+      redirect: "follow",
+    });
+    if (resp.status !== 401) {
+      return resp;
+    }
+    const authenticateStr = resp.headers.get("WWW-Authenticate");
+    if (authenticateStr === null) {
+      return resp;
+    }
+    const wwwAuthenticate = parseAuthenticate(authenticateStr);
+    return await fetchToken(wwwAuthenticate, url.searchParams);
   }
-
-  return new Response(response.body, {
-    status: response.status,
-    headers: response.headers
-  })
+  // forward requests
+  const newUrl = new URL(upstream + url.pathname + url.search);
+  const newReq = new Request(newUrl, {
+    method: request.method,
+    headers: request.headers,
+    redirect: "follow",
+  });
+  return await fetch(newReq);
 }
 
-// 判断JSON响应
-async function isJsonResponse(response) {
-  const contentType = response.headers.get('content-type') || ''
-  if (/json|text\/plain/.test(contentType)) return true
-  
-  const reader = response.clone().body.getReader()
-  const { value } = await reader.read()
-  return value && /^[\s\r\n]*[\{\[]/.test(String.fromCharCode(...value.slice(0, 1000)))
+function parseAuthenticate(authenticateStr) {
+  // sample: Bearer realm="https://auth.ipv6.docker.com/token",service="registry.docker.io"
+  // match strings after =" and before "
+  const re = /(?<=\=")(?:\\.|[^"\\])*(?=")/g;
+  const matches = authenticateStr.match(re);
+  if (matches === null || matches.length < 2) {
+    throw new Error(`invalid Www-Authenticate Header: ${authenticateStr}`);
+  }
+  return {
+    realm: matches[0],
+    service: matches[1],
+  };
 }
 
-function replaceUpstreamUrls(text, upstream, proxyHost) {
-  const targetHost = new URL(upstream).hostname
-  const replacements = [
-    { from: `https://${targetHost}`, to: `https://${proxyHost}` },
-    { from: targetHost, to: proxyHost }
-  ]
-  
-  replacements.forEach(({ from, to }) => {
-    const regex = new RegExp(escapeRegExp(from), 'g')
-    text = text.replace(regex, to)
-  })
-  
-  return text
-}
-
-function escapeRegExp(string) {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+async function fetchToken(wwwAuthenticate, searchParams) {
+  const url = new URL(wwwAuthenticate.realm);
+  if (wwwAuthenticate.service.length) {
+    url.searchParams.set("service", wwwAuthenticate.service);
+  }
+  if (searchParams.get("scope")) {
+    url.searchParams.set("scope", searchParams.get("scope"));
+  }
+  return await fetch(url, { method: "GET", headers: {} });
 }
