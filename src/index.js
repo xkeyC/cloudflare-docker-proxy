@@ -35,27 +35,21 @@ async function handleRequest(request) {
   const upstream = getUpstream(url.hostname);
   
   if (!upstream) {
-    return new Response(JSON.stringify({ routes }), { 
+    return new Response(JSON.stringify({ routes }), {
       status: 404,
       headers: { 'Content-Type': 'application/json' }
     });
   }
 
-  const headers = new Headers(request.headers);
   const dockerMode = isDockerRegistry(upstream);
-
-  // Docker认证处理
   if (dockerMode) {
     if (url.pathname === '/v2/') {
       return handleDockerAuth(upstream, request);
     }
-    
     if (url.pathname === '/v2/auth') {
       return handleDockerToken(upstream, request);
     }
   }
-
-  // 普通请求转发
   return forwardRequest(upstream, request);
 }
 
@@ -67,18 +61,16 @@ async function handleDockerAuth(upstream, request) {
   });
 
   if (probeResp.status !== 401) {
-    return new Response(null, { 
+    return new Response(null, {
       status: probeResp.status,
       headers: probeResp.headers
     });
   }
 
-  // 解析原始认证头
   const wwwAuth = probeResp.headers.get('WWW-Authenticate') || '';
   const { realm, service, scope } = parseAuthHeader(wwwAuth);
-  
-  // 构造代理认证头
   const proxyRealm = `https://${new URL(request.url).hostname}/v2/auth`;
+
   const authHeader = [
     `Bearer realm="${proxyRealm}"`,
     `service="${service || 'registry.docker.io'}"`,
@@ -94,24 +86,19 @@ async function handleDockerAuth(upstream, request) {
 async function handleDockerToken(upstream, request) {
   const url = new URL(request.url);
   const authUrl = new URL(upstream + '/v2/');
-  
-  // 获取上游认证参数
   const authResp = await fetch(authUrl, { headers: request.headers });
   const wwwAuth = authResp.headers.get('WWW-Authenticate') || '';
   const { realm, service } = parseAuthHeader(wwwAuth);
 
-  // 构建token请求URL
   const tokenUrl = new URL(realm);
   tokenUrl.searchParams.set('service', service);
   url.searchParams.forEach((v, k) => tokenUrl.searchParams.set(k, v));
 
-  // 自动补充缺失的scope
   if (!tokenUrl.searchParams.has('scope')) {
     const image = getImageName(request);
     tokenUrl.searchParams.set('scope', `repository:${image}:pull`);
   }
 
-  // 转发请求并保留原始UA
   return fetch(tokenUrl.toString(), {
     headers: {
       'User-Agent': request.headers.get('User-Agent') || '',
@@ -126,10 +113,10 @@ function forwardRequest(upstream, request) {
   
   target.pathname = url.pathname;
   target.search = url.search;
-
+  
   const headers = new Headers(request.headers);
   headers.set('Host', target.hostname);
-
+  
   return fetch(target.toString(), {
     method: request.method,
     headers: headers,
@@ -137,7 +124,6 @@ function forwardRequest(upstream, request) {
   });
 }
 
-// 工具函数
 function parseAuthHeader(header) {
   const params = {};
   header.replace(/Bearer\s+/i, '')
@@ -152,5 +138,13 @@ function parseAuthHeader(header) {
 function getImageName(request) {
   const path = new URL(request.url).pathname;
   const match = path.match(/\/v2\/([^\/]+)/);
-  return match ? match[1] : 'library/nginx';
+  let image = match ? match[1] : 'library/nginx';
+
+  if (image.startsWith('_/')) {
+    image = `library/${image.slice(2)}`;
+  } else if (!image.includes('/')) {
+    image = `library/${image}`;
+  }
+
+  return image;
 }
