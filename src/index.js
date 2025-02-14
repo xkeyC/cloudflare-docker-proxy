@@ -84,15 +84,31 @@ async function handleRequest(request) {
 
   let headers = new Headers(request.headers);
 
-  // FIX Docker HUB
+  const generateAWSTimestamp = (date) => {  // 接受Date对象作为参数
+      return [
+          date.getUTCFullYear(),
+          String(date.getUTCMonth() + 1).padStart(2, '0'),
+          String(date.getUTCDate()).padStart(2, '0'),
+          'T',
+          String(date.getUTCHours()).padStart(2, '0'),
+          String(date.getUTCMinutes()).padStart(2, '0'),
+          String(date.getUTCSeconds()).padStart(2, '0'),
+          'Z'
+      ].join('').replace(/[^0-9TZ]/g, '');
+  };
+  
   if (upstream.startsWith('https://registry-1.docker.io')) {
-    if (!headers.has('x-amz-date')) {
-      const now = new Date();
-      headers.set('x-amz-date', now.toISOString());
-    }
-    if (!headers.has('x-amz-content-sha256')) {
-      headers.set('x-amz-content-sha256', 'UNSIGNED-PAYLOAD');
-    }
+      if (!headers.has('x-amz-date')) {
+          const now = new Date();
+          const awsTimestamp = generateAWSTimestamp(now);
+   
+          headers.set('x-amz-date', awsTimestamp);
+          headers.set('Date', now.toUTCString());
+      }
+      
+      if (!headers.has('x-amz-content-sha256')) {
+          headers.set('x-amz-content-sha256', 'UNSIGNED-PAYLOAD');
+      }
   }
 
   const newUrl = new URL(upstream + url.pathname + url.search);
