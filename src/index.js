@@ -86,7 +86,7 @@ async function handleRequest(request) {
 
   // FIX Docker HUB
   if (upstream.startsWith('https://registry-1.docker.io')) {
-    if (!headers.has('x-amz-date') && !headers.has('date')) {
+    if (!headers.has('x-amz-date')) {
       const now = new Date();
       headers.set('x-amz-date', now.toISOString());
     }
