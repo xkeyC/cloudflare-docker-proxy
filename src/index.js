@@ -84,7 +84,12 @@ async function handleRequest(request) {
 
   let headers = new Headers(request.headers);
 
+  // FIX Docker HUB
   if (upstream.startsWith('https://registry-1.docker.io')) {
+    if (!headers.has('x-amz-date') && !headers.has('date')) {
+      const now = new Date();
+      headers.set('x-amz-date', now.toISOString().replace(/\.\d+Z$/, 'Z'));
+    }
     if (!headers.has('x-amz-content-sha256')) {
       headers.set('x-amz-content-sha256', 'UNSIGNED-PAYLOAD');
     }
