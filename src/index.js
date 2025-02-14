@@ -12,137 +12,61 @@ const routes = {
 };
 
 function routeByHosts(host) {
-  if (host in routes) {
-    return routes[host];
-  }
-  if (MODE == "debug") {
-    return TARGET_UPSTREAM;
-  }
-  return "";
+  return host in routes ? routes[host] : (MODE === "debug" ? TARGET_UPSTREAM : "");
 }
 
 async function handleRequest(request) {
   const url = new URL(request.url);
   const upstream = routeByHosts(url.hostname);
-  if (upstream === "") {
-    return new Response(
-      JSON.stringify({
-        routes: routes,
-      }),
-      {
-        status: 404,
-      }
-    );
-  }
-  // check if need to authenticate
-  if (url.pathname == "/v2/") {
-    const newUrl = new URL(upstream + "/v2/");
-    const resp = await fetch(newUrl.toString(), {
-      method: "GET",
-      redirect: "follow",
-    });
-    if (resp.status === 200) {
-    } else if (resp.status === 401) {
-      const headers = new Headers();
-      if (MODE == "debug") {
-        headers.set(
-          "Www-Authenticate",
-          `Bearer realm="${LOCAL_ADDRESS}/v2/auth",service="cloudflare-docker-proxy"`
-        );
-      } else {
-        headers.set(
-          "Www-Authenticate",
-          `Bearer realm="https://${url.hostname}/v2/auth",service="cloudflare-docker-proxy"`
-        );
-      }
-      return new Response(JSON.stringify({ message: "UNAUTHORIZED" }), {
-        status: 401,
-        headers: headers,
-      });
-    } else {
-      return resp;
-    }
-  }
-  // get token
-  if (url.pathname == "/v2/auth") {
-    const newUrl = new URL(upstream + "/v2/");
-    const resp = await fetch(newUrl.toString(), {
-      method: "GET",
-      redirect: "follow",
-    });
-    if (resp.status !== 401) {
-      return resp;
-    }
-    const authenticateStr = resp.headers.get("WWW-Authenticate");
-    if (authenticateStr === null) {
-      return resp;
-    }
-    const wwwAuthenticate = parseAuthenticate(authenticateStr);
-    return await fetchToken(wwwAuthenticate, url.searchParams);
-  }
-
-
-  let headers = new Headers(request.headers);
-
-  const generateAWSTimestamp = (date) => {  // 接受Date对象作为参数
-      return [
-          date.getUTCFullYear(),
-          String(date.getUTCMonth() + 1).padStart(2, '0'),
-          String(date.getUTCDate()).padStart(2, '0'),
-          'T',
-          String(date.getUTCHours()).padStart(2, '0'),
-          String(date.getUTCMinutes()).padStart(2, '0'),
-          String(date.getUTCSeconds()).padStart(2, '0'),
-          'Z'
-      ].join('').replace(/[^0-9TZ]/g, '');
-  };
   
-  if (upstream.startsWith('https://registry-1.docker.io')) {
-      if (!headers.has('x-amz-date')) {
-          const now = new Date();
-          const awsTimestamp = generateAWSTimestamp(now);
-   
-          headers.set('x-amz-date', awsTimestamp);
-          headers.set('Date', now.toUTCString());
-      }
-      
-      if (!headers.has('x-amz-content-sha256')) {
-          headers.set('x-amz-content-sha256', 'UNSIGNED-PAYLOAD');
-      }
+  if (!upstream) {
+    return new Response(JSON.stringify({ routes }), { status: 404 });
   }
 
-  const newUrl = new URL(upstream + url.pathname + url.search);
+  // 修复请求头
+  const headers = new Headers(request.headers);
+  const upstreamUrl = new URL(upstream);
+  headers.set("Host", upstreamUrl.hostname);
 
-  const newReq = new Request(newUrl, {
+  // 构造新请求
+  const newReq = new Request(upstream + url.pathname + url.search, {
     method: request.method,
     headers: headers,
     redirect: "follow",
+    body: request.body
   });
 
-  return await fetch(newReq);
+  const response = await fetch(newReq);
+  
+  const contentType = response.headers.get("content-type") || "";
+  const isJSON = contentType.includes("json") || await checkJSONPrefix(response.clone());
+
+  if (isJSON) {
+    let text = await response.text();
+    Object.entries(routes).forEach(([proxyHost, targetUrl]) => {
+      text = text.replaceAll(new URL(targetUrl).hostname, proxyHost);
+    });
+    
+    const newHeaders = new Headers(response.headers);
+    newHeaders.delete("content-length");
+    
+    return new Response(text, {
+      status: response.status,
+      headers: newHeaders
+    });
+  }
+
+  // 非JSON响应：流式处理
+  const { readable, writable } = new TransformStream();
+  response.body.pipeTo(writable);
+  
+  return new Response(readable, response);
 }
 
-function parseAuthenticate(authenticateStr) {
-  // sample: Bearer realm="https://auth.ipv6.docker.com/token",service="registry.docker.io"
-  // match strings after =" and before "
-  const re = /(?<=\=")(?:\\.|[^"\\])*(?=")/g;
-  const matches = authenticateStr.match(re);
-  if (matches === null || matches.length < 2) {
-    throw new Error(`invalid Www-Authenticate Header: ${authenticateStr}`);
-  }
-  return {
-    realm: matches[0],
-    service: matches[1],
-  };
-}
-
-async function fetchToken(wwwAuthenticate, searchParams) {
-  const url = new URL(wwwAuthenticate.realm);
-  if (wwwAuthenticate.service.length) {
-    url.searchParams.set("service", wwwAuthenticate.service);
-  }
-  if (searchParams.get("scope")) {
-    url.searchParams.set("scope", searchParams.get("scope"));
-  }
-  return await fetch(url, { method: "GET", headers: {} });
+async function checkJSONPrefix(response) {
+  const reader = response.body.getReader();
+  const { value } = await reader.read();
+  return value?.some(v => 
+    String.fromCharCode(v).trim().match(/^(\{|\[)/)
+  );
 }
