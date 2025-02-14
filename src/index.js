@@ -92,7 +92,7 @@ async function isJsonResponse(response) {
   
   const reader = response.clone().body.getReader()
   const { value } = await reader.read()
-  return value && /^[\s\r\n]*[\{\[]/.test(String.fromCharCode(...value.slice(0, 1000))))
+  return value && /^[\s\r\n]*[\{\[]/.test(String.fromCharCode(...value.slice(0, 1000)))
 }
 
 function replaceUpstreamUrls(text, upstream, proxyHost) {
