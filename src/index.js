@@ -1,7 +1,13 @@
-addEventListener("fetch", (event) => {
+addEventListener('fetch', event => {
   event.passThroughOnException();
   event.respondWith(handleRequest(event.request));
 });
+
+const DOCKER_REGISTRIES = new Set([
+  'registry-1.docker.io',
+  'gcr.io',
+  'ghcr.io'
+]);
 
 const routes = {
   "docker-hub-proxy.xkeyc.com": "https://registry-1.docker.io",
@@ -11,106 +17,129 @@ const routes = {
   "translate-g-proxy.xkeyc.com": "https://translate.googleapis.com"
 };
 
-function routeByHosts(host) {
-  if (host in routes) {
-    return routes[host];
+function getUpstream(host) {
+  return routes[host] || (MODE === "debug" ? TARGET_UPSTREAM : null);
+}
+
+function isDockerRegistry(upstream) {
+  try {
+    return DOCKER_REGISTRIES.has(new URL(upstream).hostname);
+  } catch {
+    return false;
   }
-  if (MODE == "debug") {
-    return TARGET_UPSTREAM;
-  }
-  return "";
 }
 
 async function handleRequest(request) {
   const url = new URL(request.url);
-  const upstream = routeByHosts(url.hostname);
-  if (upstream === "") {
-    return new Response(
-      JSON.stringify({
-        routes: routes,
-      }),
-      {
-        status: 404,
-      }
-    );
-  }
-  // check if need to authenticate
-  if (url.pathname == "/v2/") {
-    const newUrl = new URL(upstream + "/v2/");
-    const resp = await fetch(newUrl.toString(), {
-      method: "GET",
-      redirect: "follow",
+  const upstream = getUpstream(url.hostname);
+  
+  if (!upstream) {
+    return new Response(JSON.stringify({ routes }), { 
+      status: 404,
+      headers: { 'Content-Type': 'application/json' }
     });
-    if (resp.status === 200) {
-    } else if (resp.status === 401) {
-      const headers = new Headers();
-      if (MODE == "debug") {
-        headers.set(
-          "Www-Authenticate",
-          `Bearer realm="${LOCAL_ADDRESS}/v2/auth",service="cloudflare-docker-proxy"`
-        );
-      } else {
-        headers.set(
-          "Www-Authenticate",
-          `Bearer realm="https://${url.hostname}/v2/auth",service="cloudflare-docker-proxy"`
-        );
-      }
-      return new Response(JSON.stringify({ message: "UNAUTHORIZED" }), {
-        status: 401,
-        headers: headers,
-      });
-    } else {
-      return resp;
+  }
+
+  // 保留原始UA
+  const headers = new Headers(request.headers);
+  const userAgent = headers.get('User-Agent') || '';
+
+  // 判断是否进入Docker模式
+  const dockerMode = isDockerRegistry(upstream);
+
+  // Docker认证处理
+  if (dockerMode) {
+    if (url.pathname === '/v2/') {
+      return handleDockerAuthCheck(upstream, url, headers);
+    }
+    
+    if (url.pathname === '/v2/auth') {
+      return handleDockerToken(upstream, request, headers);
     }
   }
-  // get token
-  if (url.pathname == "/v2/auth") {
-    const newUrl = new URL(upstream + "/v2/");
-    const resp = await fetch(newUrl.toString(), {
-      method: "GET",
-      redirect: "follow",
-    });
-    if (resp.status !== 401) {
-      return resp;
-    }
-    const authenticateStr = resp.headers.get("WWW-Authenticate");
-    if (authenticateStr === null) {
-      return resp;
-    }
-    const wwwAuthenticate = parseAuthenticate(authenticateStr);
-    return await fetchToken(wwwAuthenticate, url.searchParams);
-  }
-  // forward requests
-  const newUrl = new URL(upstream + url.pathname + url.search);
-  const newReq = new Request(newUrl, {
+
+  // 普通请求转发
+  const targetUrl = new URL(upstream);
+  targetUrl.pathname = url.pathname;
+  targetUrl.search = url.search;
+
+  // 修正Host头
+  headers.set('Host', targetUrl.hostname);
+
+  return fetch(new Request(targetUrl, {
     method: request.method,
-    headers: request.headers,
-    redirect: "follow",
+    headers: headers,
+    redirect: 'follow'
+  }));
+}
+
+async function handleDockerAuthCheck(upstream, url, headers) {
+  // 探测上游/v2/端点
+  const probeUrl = new URL(upstream + '/v2/');
+  const probeResp = await fetch(probeUrl, { 
+    headers: headers,
+    redirect: 'manual'
   });
-  return await fetch(newReq);
+
+  if (probeResp.status !== 401) {
+    return new Response(null, { 
+      status: probeResp.status,
+      headers: probeResp.headers
+    });
+  }
+
+  // 构造认证头
+  const authHeader = probeResp.headers.get('WWW-Authenticate') || '';
+  const service = authHeader.match(/service="([^"]+)"/)?.[1] || 'docker.io';
+  
+  const authHeaders = new Headers({
+    'Www-Authenticate': `Bearer realm="https://${url.hostname}/v2/auth",service="${service}"`
+  });
+
+  return new Response(JSON.stringify({ status: 'UNAUTHORIZED' }), {
+    status: 401,
+    headers: authHeaders
+  });
 }
 
-function parseAuthenticate(authenticateStr) {
-  // sample: Bearer realm="https://auth.ipv6.docker.com/token",service="registry.docker.io"
-  // match strings after =" and before "
-  const re = /(?<=\=")(?:\\.|[^"\\])*(?=")/g;
-  const matches = authenticateStr.match(re);
-  if (matches === null || matches.length < 2) {
-    throw new Error(`invalid Www-Authenticate Header: ${authenticateStr}`);
+async function handleDockerToken(upstream, request, headers) {
+  const url = new URL(request.url);
+  const authUrl = new URL(upstream + '/v2/');
+  
+  // 获取上游认证头
+  const authResp = await fetch(authUrl, { headers });
+  const authHeader = authResp.headers.get('WWW-Authenticate') || '';
+  
+  // 解析认证参数
+  const params = parseAuthHeader(authHeader);
+  const tokenUrl = new URL(params.realm);
+  
+  // 保留客户端传递的所有参数
+  url.searchParams.forEach((value, key) => {
+    tokenUrl.searchParams.set(key, value);
+  });
+
+  // 自动补充scope
+  if (!tokenUrl.searchParams.has('scope')) {
+    const pathMatch = request.headers.get('Referer')?.match(/\/v2\/([^\/]+)/);
+    if (pathMatch) {
+      tokenUrl.searchParams.set('scope', `repository:${pathMatch[1]}:pull`);
+    }
   }
-  return {
-    realm: matches[0],
-    service: matches[1],
-  };
+
+  // 转发token请求（保留原始UA）
+  return fetch(tokenUrl.toString(), {
+    headers: { 'User-Agent': headers.get('User-Agent') || '' }
+  });
 }
 
-async function fetchToken(wwwAuthenticate, searchParams) {
-  const url = new URL(wwwAuthenticate.realm);
-  if (wwwAuthenticate.service.length) {
-    url.searchParams.set("service", wwwAuthenticate.service);
-  }
-  if (searchParams.get("scope")) {
-    url.searchParams.set("scope", searchParams.get("scope"));
-  }
-  return await fetch(url, { method: "GET", headers: {} });
+function parseAuthHeader(header) {
+  const params = {};
+  header.replace(/Bearer\s+/i, '')
+    .split(/,\s*/)
+    .forEach(pair => {
+      const [key, value] = pair.split('=', 2);
+      params[key] = value?.replace(/^"+|"+$/g, '') || '';
+    });
+  return params;
 }
