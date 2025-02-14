@@ -23,7 +23,8 @@ function getUpstream(host) {
 
 function isDockerRegistry(upstream) {
   try {
-    return DOCKER_REGISTRIES.has(new URL(upstream).hostname);
+    const hostname = new URL(upstream).hostname;
+    return DOCKER_REGISTRIES.has(hostname);
   } catch {
     return false;
   }
@@ -40,44 +41,28 @@ async function handleRequest(request) {
     });
   }
 
-  // 保留原始UA
   const headers = new Headers(request.headers);
-  const userAgent = headers.get('User-Agent') || '';
-
-  // 判断是否进入Docker模式
   const dockerMode = isDockerRegistry(upstream);
 
   // Docker认证处理
   if (dockerMode) {
     if (url.pathname === '/v2/') {
-      return handleDockerAuthCheck(upstream, url, headers);
+      return handleDockerAuth(upstream, request);
     }
     
     if (url.pathname === '/v2/auth') {
-      return handleDockerToken(upstream, request, headers);
+      return handleDockerToken(upstream, request);
     }
   }
 
   // 普通请求转发
-  const targetUrl = new URL(upstream);
-  targetUrl.pathname = url.pathname;
-  targetUrl.search = url.search;
-
-  // 修正Host头
-  headers.set('Host', targetUrl.hostname);
-
-  return fetch(new Request(targetUrl, {
-    method: request.method,
-    headers: headers,
-    redirect: 'follow'
-  }));
+  return forwardRequest(upstream, request);
 }
 
-async function handleDockerAuthCheck(upstream, url, headers) {
-  // 探测上游/v2/端点
-  const probeUrl = new URL(upstream + '/v2/');
-  const probeResp = await fetch(probeUrl, { 
-    headers: headers,
+async function handleDockerAuth(upstream, request) {
+  const authUrl = new URL(upstream + '/v2/');
+  const probeResp = await fetch(authUrl, {
+    headers: request.headers,
     redirect: 'manual'
   });
 
@@ -88,58 +73,84 @@ async function handleDockerAuthCheck(upstream, url, headers) {
     });
   }
 
-  // 构造认证头
-  const authHeader = probeResp.headers.get('WWW-Authenticate') || '';
-  const service = authHeader.match(/service="([^"]+)"/)?.[1] || 'docker.io';
+  // 解析原始认证头
+  const wwwAuth = probeResp.headers.get('WWW-Authenticate') || '';
+  const { realm, service, scope } = parseAuthHeader(wwwAuth);
   
-  const authHeaders = new Headers({
-    'Www-Authenticate': `Bearer realm="https://${url.hostname}/v2/auth",service="${service}"`
-  });
+  // 构造代理认证头
+  const proxyRealm = `https://${new URL(request.url).hostname}/v2/auth`;
+  const authHeader = [
+    `Bearer realm="${proxyRealm}"`,
+    `service="${service || 'registry.docker.io'}"`,
+    scope ? `scope="${scope}"` : `scope="repository:${getImageName(request)}:pull"`
+  ].filter(Boolean).join(', ');
 
-  return new Response(JSON.stringify({ status: 'UNAUTHORIZED' }), {
+  return new Response(null, {
     status: 401,
-    headers: authHeaders
+    headers: { 'Www-Authenticate': authHeader }
   });
 }
 
-async function handleDockerToken(upstream, request, headers) {
+async function handleDockerToken(upstream, request) {
   const url = new URL(request.url);
   const authUrl = new URL(upstream + '/v2/');
   
-  // 获取上游认证头
-  const authResp = await fetch(authUrl, { headers });
-  const authHeader = authResp.headers.get('WWW-Authenticate') || '';
-  
-  // 解析认证参数
-  const params = parseAuthHeader(authHeader);
-  const tokenUrl = new URL(params.realm);
-  
-  // 保留客户端传递的所有参数
-  url.searchParams.forEach((value, key) => {
-    tokenUrl.searchParams.set(key, value);
-  });
+  // 获取上游认证参数
+  const authResp = await fetch(authUrl, { headers: request.headers });
+  const wwwAuth = authResp.headers.get('WWW-Authenticate') || '';
+  const { realm, service } = parseAuthHeader(wwwAuth);
 
-  // 自动补充scope
+  // 构建token请求URL
+  const tokenUrl = new URL(realm);
+  tokenUrl.searchParams.set('service', service);
+  url.searchParams.forEach((v, k) => tokenUrl.searchParams.set(k, v));
+
+  // 自动补充缺失的scope
   if (!tokenUrl.searchParams.has('scope')) {
-    const pathMatch = request.headers.get('Referer')?.match(/\/v2\/([^\/]+)/);
-    if (pathMatch) {
-      tokenUrl.searchParams.set('scope', `repository:${pathMatch[1]}:pull`);
-    }
+    const image = getImageName(request);
+    tokenUrl.searchParams.set('scope', `repository:${image}:pull`);
   }
 
-  // 转发token请求（保留原始UA）
+  // 转发请求并保留原始UA
   return fetch(tokenUrl.toString(), {
-    headers: { 'User-Agent': headers.get('User-Agent') || '' }
+    headers: {
+      'User-Agent': request.headers.get('User-Agent') || '',
+      'Accept': 'application/json'
+    }
   });
 }
 
+function forwardRequest(upstream, request) {
+  const url = new URL(request.url);
+  const target = new URL(upstream);
+  
+  target.pathname = url.pathname;
+  target.search = url.search;
+
+  const headers = new Headers(request.headers);
+  headers.set('Host', target.hostname);
+
+  return fetch(target.toString(), {
+    method: request.method,
+    headers: headers,
+    redirect: 'follow'
+  });
+}
+
+// 工具函数
 function parseAuthHeader(header) {
   const params = {};
   header.replace(/Bearer\s+/i, '')
     .split(/,\s*/)
     .forEach(pair => {
       const [key, value] = pair.split('=', 2);
-      params[key] = value?.replace(/^"+|"+$/g, '') || '';
+      if (key) params[key] = (value || '').replace(/^"+|"+$/g, '');
     });
   return params;
+}
+
+function getImageName(request) {
+  const path = new URL(request.url).pathname;
+  const match = path.match(/\/v2\/([^\/]+)/);
+  return match ? match[1] : 'library/nginx';
 }
