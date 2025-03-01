@@ -10,8 +10,7 @@ const routes = {
   "docker-hub-proxy.xkeyc.com": dockerHub,
   "gcr-hub-proxy.xkeyc.com": "https://gcr.io",
   "ghcr-hub-proxy.xkeyc.com": "https://ghcr.io",
-  "docker-ce-proxy.xkeyc.com": "https://download.docker.com",
-  "translate-g-proxy.xkeyc.com": "https://translate.googleapis.com",
+  "docker-ce-proxy.xkeyc.com": "https://download.docker.com"
   "docker-staging.xkeyc.com": dockerHub
 };
 
