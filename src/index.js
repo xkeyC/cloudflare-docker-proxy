@@ -8,10 +8,9 @@ const dockerHub = "https://registry-1.docker.io";
 
 const routes = {
   "docker-hub-proxy.xkeyc.com": dockerHub,
-  "gcr-hub-proxy.xkeyc.com": "https://gcr.io",
-  "ghcr-hub-proxy.xkeyc.com": "https://ghcr.io",
   "docker-ce-proxy.xkeyc.com": "https://download.docker.com",
-  "docker-staging.xkeyc.com": dockerHub
+  "docker-staging.xkeyc.com": dockerHub,
+  "github-proxy.xkeyc.com": "https://github.com"
 };
 
 function routeByHosts(host) {
@@ -37,6 +36,12 @@ async function handleRequest(request) {
       }
     );
   }
+  
+  // Handle GitHub proxy
+  if (upstream === "https://github.com") {
+    return handleGitHubProxy(request, url, upstream);
+  }
+  
   const isDockerHub = upstream == dockerHub;
   const authorization = request.headers.get("Authorization");
   if (url.pathname == "/v2/") {
@@ -116,6 +121,41 @@ async function handleRequest(request) {
     return redirectResp;
   }
   return resp;
+}
+
+async function handleGitHubProxy(request, url, upstream) {
+  const userAgent = request.headers.get("User-Agent") || "";
+  
+  // 只允许 git 客户端访问，拒绝浏览器
+  // Git 客户端的 User-Agent 通常包含 "git"
+  const isGitClient = userAgent.toLowerCase().includes("git");
+  
+  if (!isGitClient) {
+    return new Response(
+      JSON.stringify({
+        error: "Access Denied",
+        message: "This proxy only supports git clone operations. Web browser access is not allowed.",
+        usage: "git clone https://" + url.hostname + "/owner/repo.git"
+      }),
+      {
+        status: 403,
+        headers: {
+          "Content-Type": "application/json"
+        }
+      }
+    );
+  }
+  
+  // 转发 git 请求到 GitHub
+  const newUrl = new URL(upstream + url.pathname + url.search);
+  const newReq = new Request(newUrl, {
+    method: request.method,
+    headers: request.headers,
+    body: request.body,
+    redirect: "follow",
+  });
+  
+  return await fetch(newReq);
 }
 
 function parseAuthenticate(authenticateStr) {
