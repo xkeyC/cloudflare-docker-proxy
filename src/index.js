@@ -12,9 +12,9 @@ const routes = {
   ['ghcr-proxy.' + customDomain]: 'https://ghcr.io',
   ['cloudsmith-proxy.' + customDomain]: 'https://docker.cloudsmith.io',
   ['ecr-proxy.' + customDomain]: 'https://public.ecr.aws',
-  ['docker-staging' + customDomain]: dockerHub,
-  ['docker-ce-proxy' + customDomain]: "https://download.docker.com",
-  ['github-proxy' + customDomain]: "https://github.com"
+  ['docker-staging.' + customDomain]: dockerHub,
+  ['docker-ce-proxy.' + customDomain]: "https://download.docker.com",
+  ['github-proxy.' + customDomain]: "https://github.com"
 }
 
 function routeByHosts(host) {
